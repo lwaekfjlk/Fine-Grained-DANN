@@ -15,6 +15,7 @@ import networkx as nx
 from pprint import pprint
 import json
 
+pd_first_time = False
 
 def normalize_weight(g: dgl.DGLHeteroGraph, weight):
     graph = g.local_var()
@@ -35,7 +36,11 @@ def get_id_2_gene(data_path: Path, tissue):
         for species in ['mouse', 'human']:
             data_files = path_dict[species].glob(f'{species}_clean_{tissue}*_data.csv')
             for file in data_files:
-                data = pd.read_csv(file, dtype=np.str, header=0).values[:, 0]
+                if (pd_first_time == True):
+                    data = pd.read_csv(file, dtype=np.str, header=0).values[:, 0]
+                    data.to_pickle(str(file)+".pkl")
+                else:
+                    data = read_pickle(str(file)+".pkl")
                 if genes is None:
                     genes = set(data)
                 else:
@@ -63,7 +68,11 @@ def get_id_2_label(data_path: Path, tissue):
         for species in ['mouse', 'human']:
             data_files = path_dict[species].glob(f'{species}_{tissue}*_celltype.csv')
             for file in data_files:
-                df = pd.read_csv(file, dtype=np.str, header=0)
+                if (pd_first_time == True):
+                    df = pd.read_csv(file, dtype=np.str, header=0)
+                    df.to_pickle(str(file)+".pkl")
+                else:
+                    df = pd.read_pickle(str(file)+".pkl")
                 df['Cell_type'] = df['Cell_type'].map(str.strip)
                 if labels is None:
                     labels = set(df.values[:, 2])
@@ -100,6 +109,8 @@ def load(params):
     mouse_gene_set = set()
     shared_gene_set = set()
     for species in ['human', 'mouse']:
+        one_hot_mat = np.eye(num_genes)
+        mul_hot_mat = np.empty((0,num_genes))
         total_node_num = num_genes
         src_list, dst_list = [], []
         weight_list = []
@@ -114,7 +125,12 @@ def load(params):
             type_file = species_path / f'{species}_{tissue}{number}_celltype.csv'
 
             # load celltype file then update labels accordingly
-            cell2type = pd.read_csv(type_file, index_col=0)
+            if (pd_first_time == True):
+                cell2type = pd.read_csv(type_file, index_col=0)
+                print(type_file)
+                cell2type.to_pickle(str(type_file)+".pkl")
+            else:
+                cell2type = pd.read_pickle(str(type_file)+".pkl")
             cell2type.columns = ['cell', 'type']
             cell2type['type'] = cell2type['type'].map(str.strip)
             cell2type['id'] = cell2type['type'].map(label2id)
@@ -126,7 +142,11 @@ def load(params):
             labels += cell2type['id'].tolist()
 
             # load data file then update graph
-            df = pd.read_csv(data_file, index_col=0)  # (gene, cell)
+            if (pd_first_time == True):
+                df = pd.read_csv(data_file, index_col=0)  # (gene, cell)
+                df.to_pickle(str(data_file)+".pkl")
+            else:
+                df = pd.read_pickle(str(data_file)+".pkl")
             df = df.transpose(copy=True)  # (cell, gene)
             # filter out cells not in label-text
             df = df.iloc[filter_cell]
@@ -139,18 +159,38 @@ def load(params):
             print(f'{data_file.name} Nonzero Ratio: {df.fillna(0).astype(bool).sum().sum() / df.size * 100:.2f}%')
             # maintain inter-datasets index for graph and RNA-seq values
             arr = df.to_numpy()
+            #arr = arr + 1
+            #print("arr : {}".format(arr.shape))
+            #print("arr : {}".format(arr[0]))
             row_idx, col_idx = np.nonzero(arr > params.threshold)  # intra-dataset index
+            print("col_idx : {}".format(len(set(col_idx))))
+            #print("col_idx : {}".format(len(col_idx)))
+            #print(arr.shape)
+            #arr = arr-1
             non_zeros = arr[(row_idx, col_idx)]  # non-zero values
             # cell_idx = row_idx + graph.number_of_nodes()  # cell_index
+            print(non_zeros.shape)
+            print(non_zeros)
 
             """ the index [0, total_node_num] represents the genes  """
             """ the index > total_node_num represents the cells """
             cell_idx = row_idx + total_node_num  # cell_index
             gene_idx = df.columns[col_idx].astype(int).tolist()  # gene_index
+            print("gene_idx : {}".format(len(gene_idx)))
+            print("gene_idx : {}".format(len(set(gene_idx))))
+            print("cell_idx : {}".format(len(cell_idx)))
+            print("cell_idx : {}".format(len(set(cell_idx))))
             # if species == 'mouse':
             info_shape = (len(df), num_genes)
             info = csr_matrix((non_zeros, (row_idx, gene_idx)), shape=info_shape)
             matrices.append(info)
+
+            ones_col = np.ones(non_zeros.shape)
+            mul_hot_sub_mat = csr_matrix((ones_col, (row_idx, gene_idx)), shape=info_shape)
+            mul_hot_sub_mat = mul_hot_sub_mat.A
+            mul_hot_mat = np.concatenate((mul_hot_mat, mul_hot_sub_mat),axis=0)
+            print("mul_hot_sub_mat : {}".format(mul_hot_sub_mat.shape))
+            print("mul_hot_mat : {}".format(mul_hot_mat.shape))
 
             num_cells += len(df)
             total_node_num += len(df)
@@ -168,21 +208,28 @@ def load(params):
                 human_gene_set = human_gene_set.union(set(gene_idx))
             if (species == 'mouse'):
                 mouse_gene_set = mouse_gene_set.union(set(gene_idx))
+        hot_mat = np.concatenate((one_hot_mat, mul_hot_mat), axis=0)
+        print("{0} : hot_mat {1}".format(species, hot_mat.shape))
         sub_data = dict()
         sub_data['graph'] = dgl.graph((src_list, dst_list))
         sub_data['num_cell'] = num_cells
         sub_data['label'] = list(map(int, labels))
         sub_data['matrices'] = matrices
+        sub_data['hot_mat'] = torch.tensor(hot_mat)
         sub_data['weight'] = torch.cat(weight_list)
         data[species] = sub_data
         assert len(labels) == num_cells
 
-    print("human gene type : {}".format(len(human_gene_set)))
-    print("mouse gene type : {}".format((mouse_gene_set)))
-    shared_gene_set = human_gene_set
-    shared_gene_set = shared_gene_set.intersection(mouse_gene_set)
-    print("Human and Mouse share {} genes".format(len(shared_gene_set)))
-
+    shared_gene_set = human_gene_set.intersection(mouse_gene_set)
+    shared_gene_list = list(shared_gene_set)
+    human_gene_list = list(human_gene_set - shared_gene_set)
+    mouse_gene_list = list(mouse_gene_set - shared_gene_set)
+    print("Human Has {} genes".format(len(human_gene_list)))
+    print("Mouse Has {} genes".format(len(mouse_gene_list)))
+    print("Human and Mouse share {} genes".format(len(shared_gene_list)))
+    data['shared_gene_tensor'] = torch.tensor(shared_gene_list)
+    data['human_gene_tensor'] = torch.tensor(human_gene_list)
+    data['mouse_gene_tensor'] = torch.tensor(mouse_gene_list)
 
     for species in ['mouse', 'human']:
         statistics = dict(collections.Counter(data[species]['label']))
@@ -199,6 +246,7 @@ def load(params):
     gene_evr = sum(gene_pca.explained_variance_ratio_) * 100
     print(f'[PCA] Gene EVR: {gene_evr:.2f} %.')
 
+    print('sparse_feat: {}'.format(sparse_feat.shape))
     print("gene_feat: {}".format(gene_feat.shape))
     gene_feat = torch.from_numpy(gene_feat)  # use shared storage
     for species in ['mouse', 'human']:
@@ -208,9 +256,15 @@ def load(params):
         # use weighted gene_feat as cell_feat
         cell_feat = sparse_feat.dot(gene_feat)
         cell_feat = torch.from_numpy(cell_feat)
+        print("gene_feat shape {} cell_feat shape {}".format(gene_feat.shape,cell_feat.shape))
         features = torch.cat([gene_feat, cell_feat], dim=0).type(torch.float)
         features = (features - torch.mean(features, dim=0)) / torch.sqrt(torch.var(features, dim=0))
+        shared_gene_features = features[shared_gene_list]
+        print('shared gene features : {}'.format(shared_gene_features.shape))
+        print('shared_gene_list : {}'.format(torch.tensor(shared_gene_list)))
+        data[species]['shared_features'] = shared_gene_features
         data[species]['features'] = features
+        print("features shape : {}".format(features.shape))
         data[species]['weight'] = normalize_weight(data[species]['graph'], data[species]['weight'])
         print(
             f"{species}: #NODES: {data[species]['graph'].number_of_nodes()}, #EDGES: {data[species]['graph'].number_of_edges()}, #CELLS: {data[species]['num_cell']}")
@@ -235,7 +289,7 @@ def load(params):
             'graph'].number_of_edges(), f"{data[species]['weight'].shape[0]} != {data[species]['graph'].number_of_edges()}"
         # assert data[species]['features'].shape[0] == data[species]['node_id'].shape[
         #     0], f"{data[species]['features'].shape[0]} != {data[species]['node_id'].shape[0]}"
-
+        print(num_genes)
     return data, len(id2label), num_genes, id2label
 
 
