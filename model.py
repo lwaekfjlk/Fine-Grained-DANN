@@ -7,14 +7,18 @@ import dgl.function as fn
 
 class FineGrainedLayerF(Function):
     @staticmethod
-    def forward(ctx, x, y, z):
+    def forward(ctx, x, y, z, class_or_domain):
         res = x+y+z
+        ctx.class_or_domain = class_or_domain
         return res.view_as(res)
 
     @staticmethod
     def backward(ctx, grad_output):
         #print(grad_output.shape)
-        return grad_output, grad_output, grad_output
+        if (ctx.class_or_domain == False):
+            return grad_output, grad_output, grad_output, None
+        if (ctx.class_or_domain == True):
+            return grad_output, grad_output, grad_output, None
 
 
 class ReverseLayerF(Function):
@@ -134,6 +138,7 @@ class GNN(nn.Module):
                         activation=self.activation,
                         weighted=weighted))
         self.linear = nn.Linear(n_hidden, n_class)
+        self.fc     = nn.Linear(n_hidden, n_hidden)
         nn.init.xavier_uniform_(self.linear.weight,
                                 gain=nn.init.calculate_gain('relu'))
 
@@ -154,31 +159,43 @@ class GNN(nn.Module):
             self.mouse_unique_mat[mouse_gene[i]][i] = 1.
 
         embed_dim = 400
-        self.shared_embedding = nn.Linear(len(shared_gene), embed_dim)
-        self.human_embedding = nn.Linear(len(human_gene), embed_dim)
-        self.mouse_embedding = nn.Linear(len(mouse_gene), embed_dim)
+        """
+        self.shared_embedding = nn.Linear(len(shared_gene), embed_dim, bias=False)
+        self.human_embedding = nn.Linear(len(human_gene), embed_dim, bias=False)
+        self.mouse_embedding = nn.Linear(len(mouse_gene), embed_dim, bias=False)
+        """
+        self.shared_embedding = nn.Linear(len(shared_gene), embed_dim, bias=False)
+        self.human_embedding = nn.Linear(len(human_gene), embed_dim, bias=False)
+        self.mouse_embedding = nn.Linear(len(mouse_gene), embed_dim, bias=False)
+        self.whole_embedding = nn.Linear(gene_num, embed_dim, bias=False)
 
-    def forward(self, blocks, x, weights, edges, alpha=1):
+        self.embed = nn.Linear(gene_num, gene_num)
+
+    def forward(self, blocks, x, weights, edges, class_or_domain, alpha=1):
         h_src = x.float().to(self.device)
+        h_src = self.embed(h_src)
+        h_src = F.relu(h_src)
         shared_gene_mat = torch.matmul(h_src, self.shared_mat)
         human_unique_gene_mat = torch.matmul(h_src, self.human_unique_mat)
         mouse_unique_gene_mat = torch.matmul(h_src, self.mouse_unique_mat)
         shared_gene_para = self.shared_embedding(shared_gene_mat)
         human_unique_gene_para = self.human_embedding(human_unique_gene_mat)
         mouse_unique_gene_para = self.mouse_embedding(mouse_unique_gene_mat)
-        #print("fowarding h_src {}".format(h_src.shape))
+        h_src = shared_gene_para + human_unique_gene_para + mouse_unique_gene_para
+        h_src = FineGrainedLayerF.apply(shared_gene_para, human_unique_gene_para, mouse_unique_gene_para, class_or_domain)
+        h_src = F.relu(h_src)
+        print("fowarding h_src {}".format(h_src.shape))
         #print('model_forward : {}'.format(x.shape))
         #print('model_shared_or_not_list : {}'.format(len(shared_or_not)))
-        h_src = FineGrainedLayerF.apply(shared_gene_para, human_unique_gene_para, mouse_unique_gene_para)
         for i, (layer, block, edge) in enumerate(zip(self.layers, blocks, edges)):
             # We need to first copy the representation of nodes on the RHS from the
             # appropriate nodes on the LHS.
             # Note that the shape of h is (num_nodes_LHS, D) and the shape of h_dst
             # would be (num_nodes_RHS, D)
-            h_dst= h_src[:block.number_of_dst_nodes()]
-            #print("forwarding h_dst {}".format(h_dst.shape))
-#            h_src = torch.nn.Parameter(h_src)
-#            self.register_parameter('h_src', h_src)
+            h_dst = h_src[:block.number_of_dst_nodes()]
+           #print("forwarding h_dst {}".format(h_dst.shape))
+            #h_src = torch.nn.Parameter(h_src)
+            #self.register_parameter('h_src', h_src)
             #print("list shape : {}".format(shared_or_not.shape))
             #print("dst shape: {}, src shape: {}".format(h_dst.shape, h_src.shape))
             # weight = weights[edge2parent[edge]].to(h_src.device)
@@ -190,8 +207,9 @@ class GNN(nn.Module):
         # domain_x = self.domain_classifier(h_src)
         reverse_x = ReverseLayerF.apply(h_src, alpha) # forward
         domain_x = self.domain_classifier(reverse_x)
-        h_x = self.linear(h_src)
-
+        h_x = self.fc(h_src)
+        h_x = F.relu(h_x)
+        h_x = self.linear(h_x)
         return h_x, domain_x
 
     def cal_loss(self, pred, gold, smoothing=0.0):

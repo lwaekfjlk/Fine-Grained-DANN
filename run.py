@@ -25,6 +25,8 @@ class Runner(object):
         #self.device = torch.device('cpu')
         self.data, self.num_classes, self.num_genes, self.id2label = load(
             self.p)
+        #self.data['human']['hot_mat'] = torch.rand(self.data['human']['hot_mat'].shape)
+        #self.data['mouse']['hot_mat'] = torch.rand(self.data['mouse']['hot_mat'].shape)
         #print(self.data['shared_gene_tensor'])
         #print(torch.min(self.data['shared_gene_tensor']))
         #print(torch.max(self.data['shared_gene_tensor']))
@@ -128,33 +130,32 @@ class Runner(object):
                 else:
                     source_batch_shared_or_not_list.append(-1)
             source_batch_shared_or_not = torch.tensor(source_batch_shared_or_not_list,dtype=torch.float)
-            #print("source_batch_input : {}".format(source_batch_input.shape))
-            #print("source_batch_label : {}".format(source_batch_labels.shape))
-            source_class_output, source_domain_output = self.model(
+
+            class_or_domain = True
+            source_class_output, _ = self.model(
                 source_blocks, source_batch_input,
-                self.data[species]['weight'], source_edges, alpha)
+                self.data[species]['weight'], source_edges, class_or_domain, alpha)
             label_loss = self.model.cal_loss(source_class_output,
                                              source_batch_labels,
                                              self.p.lbl_smooth)
+
+            self.optimizer.zero_grad()
+            label_loss.backward(retain_graph=True)
+
+            class_or_domain = False
+            _, source_domain_output = self.model(
+                source_blocks, source_batch_input,
+                self.data[species]['weight'], source_edges, class_or_domain, alpha)
 
             target_input_nodes = target_blocks[0].srcdata[dgl.NID]
             target_seeds = target_blocks[-1].dstdata[dgl.NID]
             target_batch_input, target_batch_labels, target_batch_seeds = self.to_device(
                 'human', target_seeds, target_input_nodes)
             target_blocks = [b.to(self.device) for b in target_blocks]
-
-            target_batch_shared_or_not_list = []
-            for i in range(target_input_nodes.shape[0]):
-                if (target_input_nodes[i] in shared_gene_tensor):
-                    target_batch_shared_or_not_list.append(1)
-                else:
-                    target_batch_shared_or_not_list.append(-1)
-            # print("target_batch_shared_or_not_list {}".format(len(target_batch_shared_or_not_list)))
-            target_batch_shared_or_not = torch.tensor(target_batch_shared_or_not_list,dtype=torch.float)
             _, target_domain_output = self.model(target_blocks,
                                                  target_batch_input,
                                                  self.data['human']['weight'],
-                                                 target_edges, alpha)
+                                                 target_edges, class_or_domain, alpha)
 
             domain_label = torch.tensor(
                 [0] * source_domain_output.shape[0] +
@@ -162,11 +163,10 @@ class Runner(object):
             domain_loss = self.domain_criterion(
                 torch.cat([source_domain_output, target_domain_output]),
                 domain_label)
+            domain_loss.backward()
+            self.optimizer.step()
 
             loss = domain_loss + label_loss
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
             losses.append(loss.item())
         return np.mean(losses)
 
@@ -192,9 +192,11 @@ class Runner(object):
 
             batch_shared_or_not = torch.tensor(batch_shared_or_not_list,dtype=torch.float)
             """
+
+            class_or_domain = True
             with torch.no_grad():
                 batch_pred, _ = self.model(blocks, batch_input,
-                                           self.data[species]['weight'], edges, alpha=1)
+                                           self.data[species]['weight'], edges, class_or_domain,alpha=1)
             indices = torch.argmax(batch_pred, dim=1)
             label.extend(batch_labels.tolist())
             pred.extend(indices.tolist())
@@ -225,6 +227,7 @@ class Runner(object):
         #print("human gene used {}".format(len(set(col))))
         batch_input = self.data[species]['hot_mat'][input_nodes].to(
             self.device)
+
         batch_labels = self.data[species]['label'][seeds].to(self.device)
         batch_seeds = self.data[species]['hot_mat'][seeds].to(self.device)
         return batch_input, batch_labels, batch_seeds

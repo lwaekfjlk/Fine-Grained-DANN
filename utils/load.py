@@ -215,7 +215,7 @@ def load(params):
         sub_data['num_cell'] = num_cells
         sub_data['label'] = list(map(int, labels))
         sub_data['matrices'] = matrices
-        sub_data['hot_mat'] = torch.tensor(hot_mat)
+        sub_data['hot_mat'] = torch.zeros(hot_mat.shape)#torch.tensor(hot_mat)
         sub_data['weight'] = torch.cat(weight_list)
         data[species] = sub_data
         assert len(labels) == num_cells
